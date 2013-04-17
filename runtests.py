@@ -42,6 +42,7 @@ if not settings.configured and not os.environ.get('DJANGO_SETTINGS_MODULE'):
         STATIC_URL='/static/',
         TEMPLATE_DIRS=(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test/test_project/templates'), ),
         PYBB_ATTACHMENT_ENABLE=True,
+        PYBB_PERMISSION_HANDLER='test.test_project.test_permissions.CustomPermissionHandler'
         TEMPLATE_CONTEXT_PROCESSORS=TEMPLATE_CONTEXT_PROCESSORS,
         AUTH_USER_MODEL='test_project.CustomUser',
         LOGIN_URL='/'
