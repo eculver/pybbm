@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+from django.contrib.auth.models import Permission
+from django.db.models.signals import post_delete, post_save
+from pybb.subscription import notify_topic_subscribers
 
 import os.path
 import uuid
@@ -16,7 +19,7 @@ try:
     from sorl.thumbnail import ImageField
 except ImportError:
     from django.db.models import ImageField
-from pybb.util import unescape, get_user_model, get_username_field
+from pybb.util import unescape, get_user_model, get_username_field, get_pybb_profile_model, get_pybb_profile
 
 User = get_user_model()
 username_field = get_username_field()
@@ -131,15 +134,12 @@ class Forum(models.Model):
     def posts(self):
         return Post.objects.filter(topic__forum=self).select_related()
 
-    def get_last_post(self):
+    @property
+    def last_post(self):
         try:
             return self.posts.order_by('-created')[0]
         except IndexError:
             return None
-
-    @property
-    def last_post(self):
-        return self.get_last_post()
 
     def get_parents(self):
         """
@@ -194,12 +194,11 @@ class Topic(models.Model):
             return None
         return self._head[0]
 
-    def get_last_post(self):
-        return self.posts.order_by('-created').select_related('user')[0]
-
     @property
     def last_post(self):
-        return self.get_last_post()
+        if not getattr(self, '_last_post', None):
+            self._last_post = self.posts.order_by('-created').select_related('user')[0]
+        return self._last_post
 
     def get_absolute_url(self):
         return reverse('pybb:topic', kwargs={'pk': self.id})
@@ -504,6 +503,8 @@ class PollAnswer(models.Model):
         topic_votes = self.topic.poll_votes()
         if topic_votes > 0:
             return 1.0 * self.votes() / topic_votes * 100
+        else:
+            return 0
 
 
 class PollAnswerUser(models.Model):
@@ -520,5 +521,39 @@ class PollAnswerUser(models.Model):
         return u'%s - %s' % (self.poll_answer.topic, self.user)
 
 
-from pybb import signals
-signals.setup_signals()
+def post_saved(instance, **kwargs):
+    notify_topic_subscribers(instance)
+
+    if get_pybb_profile(instance.user).autosubscribe:
+        instance.topic.subscribers.add(instance.user)
+
+    if kwargs['created']:
+        profile = get_pybb_profile(instance.user)
+        profile.post_count = instance.user.posts.count()
+        profile.save()
+
+
+def post_deleted(instance, **kwargs):
+    profile = get_pybb_profile(instance.user)
+    profile.post_count = instance.user.posts.count()
+    profile.save()
+
+
+def user_saved(instance, created, **kwargs):
+    if not created:
+        return
+    try:
+        add_post_permission = Permission.objects.get_by_natural_key('add_post', 'pybb', 'post')
+        add_topic_permission = Permission.objects.get_by_natural_key('add_topic', 'pybb', 'topic')
+    except Permission.DoesNotExist:
+        return
+    instance.user_permissions.add(add_post_permission, add_topic_permission)
+    instance.save()
+    if get_pybb_profile_model() == Profile:
+        Profile(user=instance).save()
+
+
+post_save.connect(post_saved, sender=Post)
+post_delete.connect(post_deleted, sender=Post)
+if defaults.PYBB_AUTO_USER_PERMISSIONS:
+    post_save.connect(user_saved, sender=get_user_model())

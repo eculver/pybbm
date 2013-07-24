@@ -37,15 +37,11 @@ class SharedTestModule(object):
         self.client.login(username=username, password=password)
 
     def create_initial(self, post=True):
-        self.category = Category(name='foo')
-        self.category.save()
-        self.forum = Forum(name='xfoo', description='bar', category=self.category)
-        self.forum.save()
-        self.topic = Topic(name='etopic', forum=self.forum, user=self.user)
-        self.topic.save()
+        self.category = Category.objects.create(name='foo')
+        self.forum = Forum.objects.create(name='xfoo', description='bar', category=self.category)
+        self.topic = Topic.objects.create(name='etopic', forum=self.forum, user=self.user)
         if post:
-            self.post = Post(topic=self.topic, user=self.user, body='bbcode [b]test[b]')
-            self.post.save()
+            self.post = Post.objects.create(topic=self.topic, user=self.user, body='bbcode [b]test[b]')
 
     def get_form_values(self, response, form="post-form"):
         return dict(html.fromstring(response.content).xpath('//form[@class="%s"]' % form)[0].form_values())
@@ -658,12 +654,29 @@ class FeaturesTest(TestCase, SharedTestModule):
 
     def test_user_blocking(self):
         user = User.objects.create_user('test', 'test@localhost', 'test')
+        topic = Topic.objects.create(name='topic', forum=self.forum, user=self.user)
+        self.post = Post.objects.create(topic=topic, user=user, body='bbcode [b]test[b]')
         self.user.is_superuser = True
         self.user.save()
         self.login_client()
-        self.assertEqual(self.client.get(reverse('pybb:block_user', args=[user.username]), follow=True).status_code, 200)
+        response = self.client.get(reverse('pybb:block_user', args=[user.username]), follow=True)
+        self.assertEqual(response.status_code, 405)
+        response = self.client.post(reverse('pybb:block_user', args=[user.username]), follow=True)
+        self.assertEqual(response.status_code, 200)
         user = User.objects.get(username=user.username)
         self.assertFalse(user.is_active)
+        self.assertEqual(Topic.objects.filter().count(), 2)
+        self.assertEqual(Post.objects.filter(user=user).count(), 1)
+
+        user.is_active = True
+        user.save()
+        response = self.client.post(reverse('pybb:block_user', args=[user.username]),
+                                    data={'block_and_delete_messages': 'block_and_delete_messages'}, follow=True)
+        self.assertEqual(response.status_code, 200)
+        user = User.objects.get(username=user.username)
+        self.assertFalse(user.is_active)
+        self.assertEqual(Topic.objects.filter().count(), 1)
+        self.assertEqual(Post.objects.filter(user=user).count(), 0)
 
     def test_ajax_preview(self):
         self.login_client()
@@ -872,7 +885,6 @@ class FeaturesTest(TestCase, SharedTestModule):
         self.assertEqual(latest_topics[0].name, 'topic9')
         self.assertEqual(latest_topics[4].name, 'topic5')
 
-
     def test_latest_posts_tag(self):
         Post.objects.all().delete()
         for i in range(10):
@@ -882,6 +894,21 @@ class FeaturesTest(TestCase, SharedTestModule):
         self.assertEqual(latest_topics[0].body, 'post9')
         self.assertEqual(latest_topics[4].body, 'post5')
 
+    def test_multiple_objects_returned(self):
+        """
+        see issue #87: https://github.com/hovel/pybbm/issues/87
+        """
+        self.assertFalse(self.user.is_superuser)
+        self.assertFalse(self.user.is_staff)
+        self.assertFalse(self.topic.on_moderation)
+        self.assertEqual(self.topic.user, self.user)
+        user1 = User.objects.create_user('geyser', 'geyser@localhost', 'geyser')
+        self.topic.forum.moderators.add(self.user)
+        self.topic.forum.moderators.add(user1)
+
+        self.login_client()
+        response = self.client.get(reverse('pybb:add_post', kwargs={'topic_id': self.topic.id}))
+        self.assertEqual(response.status_code, 200)
 
     def tearDown(self):
         defaults.PYBB_ENABLE_ANONYMOUS_POST = self.ORIG_PYBB_ENABLE_ANONYMOUS_POST
@@ -1142,6 +1169,7 @@ class PollTest(TestCase, SharedTestModule):
         values['poll_answers-1-DELETE'] = 'on'
         values['poll_answers-TOTAL_FORMS'] = 2
         response = self.client.post(add_topic_url, values, follow=True)
+        self.assertEqual(response.status_code, 200)
         self.assertFalse(Topic.objects.filter(name='test poll name').exists())
 
     def test_regression_poll_deletion_after_second_post(self):
@@ -1232,14 +1260,28 @@ class PollTest(TestCase, SharedTestModule):
 
         # already voted
         response = self.client.post(vote_url, data=values, follow=True)
-        self.assertEqual(response.status_code, 400) # bad request status
+        self.assertEqual(response.status_code, 403) # bad request status
 
         recreate_poll(poll_type=Topic.POLL_TYPE_MULTIPLE)
         values = {'answers': [a.id for a in PollAnswer.objects.all()]}
         response = self.client.post(vote_url, data=values, follow=True)
         self.assertEqual(response.status_code, 200)
-        self.assertListEqual([a.votes() for a in PollAnswer.objects.all()], [1, 1, ])
-        self.assertListEqual([a.votes_percent() for a in PollAnswer.objects.all()], [50.0, 50.0, ])
+        self.assertListEqual([a.votes() for a in PollAnswer.objects.all()], [1, 1])
+        self.assertListEqual([a.votes_percent() for a in PollAnswer.objects.all()], [50.0, 50.0])
+
+        response = self.client.post(vote_url, data=values, follow=True)
+        self.assertEqual(response.status_code, 403)  # already voted
+
+        cancel_vote_url = reverse('pybb:topic_cancel_poll_vote', kwargs={'pk': self.topic.id})
+        response = self.client.post(cancel_vote_url, data=values, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertListEqual([a.votes() for a in PollAnswer.objects.all()], [0, 0])
+        self.assertListEqual([a.votes_percent() for a in PollAnswer.objects.all()], [0, 0])
+
+        response = self.client.post(vote_url, data=values, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertListEqual([a.votes() for a in PollAnswer.objects.all()], [1, 1])
+        self.assertListEqual([a.votes_percent() for a in PollAnswer.objects.all()], [50.0, 50.0])
 
     def tearDown(self):
         defaults.PYBB_POLL_MAX_ANSWERS = self.PYBB_POLL_MAX_ANSWERS

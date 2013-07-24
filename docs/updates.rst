@@ -1,11 +1,23 @@
 Updating PyBBM Version
 ======================
 
-0.13.1 -> dev
+0.14 -> 0.14.2
+--------------
+* Fixed MultipleObjectReturned when topic has more than one moderator
+
+0.14 -> 0.14.1
+--------------
+* Fixed circular import issue
+
+0.13.1 -> 0.14
 -------------
 
 * Restored views for rendering user's posts and topics and link to that views from profile info page
 * Broken hard dependency from EditProfileView and EditProfileForm classes in forum
+* Ability for users to cancel their poll vote
+* Block user view accepts only POST requests
+* If `block_and_delete_messages` passed to request.POST for block user view,
+  then all user's messages will be deleted
 
 0.13 -> 0.13.1
 --------------

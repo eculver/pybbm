@@ -7,11 +7,13 @@ from django.core.exceptions import ObjectDoesNotExist, PermissionDenied
 from django.core.urlresolvers import reverse
 from django.contrib import messages
 from django.db.models import F, Q
+from django.db.models.aggregates import Count
 from django.http import HttpResponseRedirect, HttpResponse, Http404, HttpResponseBadRequest,\
     HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.translation import ugettext as _
 from django.utils.decorators import method_decorator
+from django.views.decorators.http import require_POST
 from django.views.generic.edit import ModelFormMixin
 from django.views.decorators.csrf import csrf_protect
 from django.views import generic
@@ -183,6 +185,8 @@ class TopicView(RedirectToLoginMixin, generic.ListView):
         self.topic.views += 1
         self.topic.save()
         qs = self.topic.posts.all().select_related('user')
+        if defaults.PYBB_PROFILE_RELATED_NAME:
+            qs = qs.select_related('user__%s' % defaults.PYBB_PROFILE_RELATED_NAME)
         if not perms.may_moderate_topic(self.request.user, self.topic):
             qs = perms.filter_posts(self.request.user, qs)
         return qs
@@ -584,7 +588,7 @@ class TopicPollVoteView(generic.UpdateView):
     def form_valid(self, form):
         # already voted
         if not pybb_topic_poll_not_voted(self.object, self.request.user):
-            return HttpResponseBadRequest()
+            return HttpResponseForbidden()
 
         answers = form.cleaned_data['answers']
         for answer in answers:
@@ -596,10 +600,17 @@ class TopicPollVoteView(generic.UpdateView):
         return super(ModelFormMixin, self).form_valid(form)
 
     def form_invalid(self, form):
-        return self.object.get_absolute_url()
+        return redirect(self.object)
 
     def get_success_url(self):
         return self.object.get_absolute_url()
+
+
+@login_required
+def topic_cancel_poll_vote(request, pk):
+    topic = get_object_or_404(Topic, pk=pk)
+    PollAnswerUser.objects.filter(user=request.user, poll_answer__topic_id=topic.id).delete()
+    return HttpResponseRedirect(topic.get_absolute_url())
 
 
 @login_required
@@ -635,12 +646,20 @@ def mark_all_as_read(request):
 
 
 @login_required
+@require_POST
 def block_user(request, username):
     user = get_object_or_404(User, **{username_field: username})
     if not perms.may_block_user(request.user, user):
         raise PermissionDenied
     user.is_active = False
     user.save()
+    if 'block_and_delete_messages' in request.POST:
+        # individually delete each post and empty topic to fire method
+        # with forum/topic counters recalculation
+        for p in Post.objects.filter(user=user):
+            p.delete()
+        for t in Topic.objects.annotate(cnt=Count('posts')).filter(cnt=0):
+            t.delete()
     msg = _('User successfuly blocked')
     messages.success(request, msg, fail_silently=True)
     return redirect('pybb:index')
